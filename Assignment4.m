@@ -62,10 +62,23 @@ function grad_RNN = gradient(RNN, X, Y)
     grad_V = grad_O.'*H.';
     grad_c = sum(grad_O.',2);
     
+    grad_W = 0;
+    h = zeros(m, 1);
+    for t = 1:tau
+        grad_W = grad_W + grad_A(t,:).'*h.';
+        h = H(:,t);
+    end
+    
+    grad_U = grad_A.'*X.';
+    grad_b = sum(grad_A.',2);
+    
+    assert(isequal(size(grad_W),size(RNN.W)));
     assert(isequal(size(grad_V),size(RNN.V)));
     assert(isequal(size(grad_c),size(RNN.c)));
+    assert(isequal(size(grad_U),size(RNN.U)));
+    assert(isequal(size(grad_b),size(RNN.b)));
     
-    grad_RNN = struct('V',grad_V,'c',grad_c);
+    grad_RNN = struct('W',grad_W,'U',grad_U,'V',grad_V,'c',grad_c,'b',grad_b);
     %default_model(m,K);
     %grad_RNN.V = grad_V;
 end
