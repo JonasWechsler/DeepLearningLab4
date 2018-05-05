@@ -16,6 +16,15 @@ function model = init_model(b,c,U,W,V)
     model = struct('b', b, 'c', c, 'U', U, 'W', W, 'V', V);
 end
 
+function model = zero_model(m, K)
+    b = zeros(m, 1);
+    c = zeros(K, 1);
+    U = zeros(m, K);
+    W = zeros(m, m);
+    V = zeros(K, m);
+    model = init_model(b,c,U,W,V);
+end
+
 function model = default_model(m, K)
     sig = 0.01;
     b = zeros(m, 1);
@@ -26,19 +35,25 @@ function model = default_model(m, K)
     model = init_model(b,c,U,W,V);
 end
 
-function L = ComputeLoss(RNN, X, Y)
-    [P, ~, ~] = evaluate(RNN, X);
+function L = ComputeLoss(RNN, X, Y, hprev)
+    if ~exist('hprev','var')
+        [P, ~, ~] = evaluate(RNN, X);
+    else
+        [P, ~, ~] = evaluate(RNN, X, hprev);
+    end
     
     YTP = sum(Y'.*P',2);
     L = sum(-1*arrayfun(@log, YTP));
 end
 
-function grad_RNN = gradient(RNN, X, Y)
-    [P, H, A] = evaluate(RNN, X);
+function [grad_RNN, hprev] = gradient(RNN, X, Y, h)
+    [P, H, A] = evaluate(RNN, X, h);
     
     K = size(X, 1);
     tau = size(X, 2);
     m = size(RNN.V,2);
+    
+    hprev = H(:,tau);
     
     grad_O = -(Y-P).';
     
@@ -68,12 +83,21 @@ function grad_RNN = gradient(RNN, X, Y)
     grad_b = sum(grad_A.',2);
     
     grad_RNN = init_model(grad_b, grad_c, grad_U, grad_W, grad_V);
-    %grad_RNN = struct('W',grad_W,'U',grad_U,'V',grad_V,'c',grad_c,'b',grad_b);
 end
 
-function [P, H, A] = evaluate(RNN, X)
+function grad_RNN = clip(grad_RNN)
+    for f = fieldnames(grad_RNN)'
+        grad_RNN.(f{1}) = max(min(grad_RNN.(f{1}), 5), -5);
+    end
+end
+
+function [P, H, A] = evaluate(RNN, X, h)
     m = size(RNN.U, 1);
-    h = zeros(m, 1);
+    
+    if ~exist("h", "var")
+        h = zeros(m, 1);
+    end
+
     tau = size(X, 2);
     P = zeros(size(X));
     H = zeros(m, tau);
@@ -88,16 +112,22 @@ function [P, H, A] = evaluate(RNN, X)
     end
 end
 
-function Y = synthesize(RNN, h0, x, n)
+function Y = synthesize(RNN, n, x, h0)
+    if ~exist('h0', 'var')
+        h0 = zeros(size(RNN.b));
+    end
+    
+    if ~exist('x', 'var')
+        x = zeros(size(RNN.c));
+        x(1) = 1;
+    end
+    
     [K, ~] = size(x);
     Y = zeros(K, n);
     h = h0;
     
     for t = 1:n
-        a = RNN.W*h + RNN.U*x + RNN.b;
-        h = tanh(a);
-        o = RNN.V*h + RNN.c;
-        p = soft_max(o);
+        [p, h, ~] = evaluate(RNN, x, h);
         
         cp = cumsum(p);
         a = rand;
@@ -107,19 +137,80 @@ function Y = synthesize(RNN, h0, x, n)
         x = zeros(K,1);
         x(ii) = 1;
         Y(ii, t) = 1;
-        assert(isequal(Y(:,t), x));
     end
-    
-    
-    % Equations 1-4
 end
 
-function [X, Y] = init
+function [RNN, M] = adagrad(RNN, M, RNN_grad, eta)
+    for f_cell = fieldnames(RNN_grad)'
+        f = f_cell{1};
+        g = RNN_grad.(f);
+        M.(f) = M.(f) + g.^2;
+        denom = sqrt(M.(f) + eps).^-1;
+        RNN.(f) = RNN.(f) - eta*denom.*g;
+    end 
+end
+
+function [X, Y] = one_hot_encode(X_chars, Y_chars)
+    global char_to_ind;
+    K = size(char_to_ind,1);
+    
+    seq_length = size(X_chars,2);
+    X = zeros(K, seq_length);
+    Y = zeros(K, seq_length);
+    
+    for idx = 1:size(X_chars,2)
+        ch_idx = char_to_ind(X_chars(idx));
+        X(ch_idx, idx) = 1;
+        ch_idy = char_to_ind(Y_chars(idx));
+        Y(ch_idy, idx) = 1;
+    end
+end
+
+function RNN = epoch(RNN, arch, book_data)
+    global ind_to_char;
+    e = 1;
+    hprev = zeros(arch.m, 1);
+    smooth_loss = 0;
+    [m, K] = size(RNN.U);
+    assert(arch.m == m);
+    M = zero_model(m,K);
+    
+    iteration = 0;
+    while e <= length(book_data)-arch.seq_length
+        en = e + arch.seq_length;
+        X_chars = book_data(e:en-1);
+        Y_chars = book_data(e+1:en);
+        [X, Y] = one_hot_encode(X_chars, Y_chars);
+        
+        [grad_RNN, hprev] = gradient(RNN, X, Y, hprev);
+        grad_RNN = clip(grad_RNN);
+        [RNN, M] = adagrad(RNN, M, grad_RNN, arch.eta);
+        
+        loss = ComputeLoss(RNN, X, Y);
+        smooth_loss = 0.999*smooth_loss + 0.001*loss;
+        
+        if mod(iteration, 100) == 0
+            fprintf("%d, %d\n", iteration, loss);
+        end
+        
+        if mod(iteration, 500) == 0
+                r = synthesize(RNN, 200, X(:, 1), hprev);
+    
+                for idx = 1:size(r,2)
+                    fprintf('%s', ind_to_char(find(r(:,idx))));
+                end
+                fprintf('\n');
+        end
+        
+        iteration = iteration + 1;
+        e = e + arch.seq_length;
+    end
+end
+
+function [book_data, K] = init(arch)
     book_fname = 'data/goblet_book.txt';
     book_data = load(book_fname);
     book_chars = unique(book_data);
-    
-    arch = default_architecture();
     
     global char_to_ind;
     global ind_to_char;
@@ -134,26 +225,20 @@ function [X, Y] = init
         char_to_ind(ch) = idx;
         ind_to_char(idx) = ch;
     end
-    
-    X_chars = book_data(1:arch.seq_length);
-    Y_chars = book_data(2:arch.seq_length+1);
-    X = zeros(K, arch.seq_length);
-    Y = zeros(K, arch.seq_length);
-    
-    for idx = 1:size(X_chars,2)
-        ch_idx = char_to_ind(X_chars(idx));
-        X(ch_idx, idx) = 1;
-        ch_idy = char_to_ind(Y_chars(idx));
-        Y(ch_idy, idx) = 1;
-    end
 end
 
 function main
-    [X, Y] = init();
-    K = size(X, 1);
-    
     arch = default_architecture();
+    [book_data, K] = init(arch);
+    
     RNN = default_model(arch.m, K);
+    RNN = epoch(RNN, arch, book_data);
+    RNN = epoch(RNN, arch, book_data);
+        
+    %{
+    X_chars = book_data(1:arch.seq_length);
+    Y_chars = book_data(2:arch.seq_length+1);
+    [X, Y] = one_hot_encode(X_chars, Y_chars);
     
     global ind_to_char;
     global char_to_ind;
@@ -166,7 +251,7 @@ function main
     x = zeros(K, 1);
     x(3) = 1;
     n = 5;
-    r = synthesize(RNN, h0, x, n);
+    r = synthesize(RNN, n, x, h0);
     
     for idx = 1:size(r,2)
         disp(ind_to_char(find(r(:,idx))));
@@ -175,20 +260,22 @@ function main
     disp(ComputeLoss(RNN, X, Y));
     disp(gradient(RNN, X, Y));
     tester_main();
+    %}
 end
 
 function tester_main
-    [X, Y] = init();
+    arch = default_architecture();
+    arch.m = 5;
+    [X, Y] = init(arch);
     K = size(X, 1);
     
     for t=1:10
-        RNN = default_model(5, K);
+        RNN = default_model(arch.m, K);
 
-        analytical_grad = gradient(RNN, X, Y);
+        [analytical_grad, ~] = gradient(RNN, X, Y);
         numerical_grad = ComputeGradsNum(X, Y, RNN, 1e-4);
         max_diff(analytical_grad, numerical_grad);
     end
-    %disp(ComputeGradsNum(X, Y, RNN, 1e-5));
 end
 
 function mu = soft_max(eta)
@@ -219,13 +306,13 @@ end
 function grad = ComputeGradNum(X, Y, f, RNN, h)
     n = numel(RNN.(f));
     grad = zeros(size(RNN.(f)));
-    %hprev = zeros(size(RNN.W, 1), 1);
+    hprev = zeros(size(RNN.W, 1), 1);
     for i=1:n
         RNN_try = RNN;
         RNN_try.(f)(i) = RNN.(f)(i) - h;
-        l1 = ComputeLoss(RNN_try, X, Y);
+        l1 = ComputeLoss(RNN_try, X, Y, hprev);
         RNN_try.(f)(i) = RNN.(f)(i) + h;
-        l2 = ComputeLoss(RNN_try, X, Y);
+        l2 = ComputeLoss(RNN_try, X, Y, hprev);
         grad(i) = (l2-l1)/(2*h);
     end
 end
