@@ -62,25 +62,13 @@ function grad_RNN = gradient(RNN, X, Y)
     grad_V = grad_O.'*H.';
     grad_c = sum(grad_O.',2);
     
-    grad_W = 0;
-    h = zeros(m, 1);
-    for t = 1:tau
-        grad_W = grad_W + grad_A(t,:).'*h.';
-        h = H(:,t);
-    end
-    
+    H_minus_one = [zeros(m, 1) H(:,1:tau-1)];
+    grad_W = grad_A.'*H_minus_one.';
     grad_U = grad_A.'*X.';
     grad_b = sum(grad_A.',2);
     
-    assert(isequal(size(grad_W),size(RNN.W)));
-    assert(isequal(size(grad_V),size(RNN.V)));
-    assert(isequal(size(grad_c),size(RNN.c)));
-    assert(isequal(size(grad_U),size(RNN.U)));
-    assert(isequal(size(grad_b),size(RNN.b)));
-    
-    grad_RNN = struct('W',grad_W,'U',grad_U,'V',grad_V,'c',grad_c,'b',grad_b);
-    %default_model(m,K);
-    %grad_RNN.V = grad_V;
+    grad_RNN = init_model(grad_b, grad_c, grad_U, grad_W, grad_V);
+    %grad_RNN = struct('W',grad_W,'U',grad_U,'V',grad_V,'c',grad_c,'b',grad_b);
 end
 
 function [P, H, A] = evaluate(RNN, X)
@@ -192,12 +180,14 @@ end
 function tester_main
     [X, Y] = init();
     K = size(X, 1);
-    arch = default_architecture();
-    RNN = default_model(arch.m, K);
     
-    analytical_grad = gradient(RNN, X, Y);
-    numerical_grad = ComputeGradsNum(X, Y, RNN, 1e-5);
-    max_diff(analytical_grad, numerical_grad);
+    for t=1:10
+        RNN = default_model(5, K);
+
+        analytical_grad = gradient(RNN, X, Y);
+        numerical_grad = ComputeGradsNum(X, Y, RNN, 1e-4);
+        max_diff(analytical_grad, numerical_grad);
+    end
     %disp(ComputeGradsNum(X, Y, RNN, 1e-5));
 end
 
@@ -220,8 +210,8 @@ end
 
 function num_grads = ComputeGradsNum(X, Y, RNN, h)
     for f = fieldnames(RNN)'
-        disp('Computing numerical gradient for')
-        disp(['Field name: ' f{1} ]);
+        %disp('Computing numerical gradient for')
+        %disp(['Field name: ' f{1} ]);
         num_grads.(f{1}) = ComputeGradNum(X, Y, f{1}, RNN, h);
     end
 end
